@@ -1,0 +1,380 @@
+---
+title: "Project1_kl2993"
+output: html_notebook
+---
+Here I conduct a brief study about "What did the presidents say at their inauguation?". In this project I explored the texts of U.S. presidents' inaugrual speeches, from that of George Washington to that of Donald Trump which was delivered earlier this year. I focus on the differences between parties and terms to do basic analysis, topic model and sentient analysis. 
+
+#Step 0: Check and install needed packages. Load the libraries and functions
+```{r}
+library(tm)
+library(wordcloud)
+library(RColorBrewer)
+library(plyr)
+library(dplyr)
+library(tidytext)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(readr)
+library(ggplot2)
+library(stringr)
+library(topicmodels)
+library(widyr)
+```
+
+This notebook was prepared with the following environmental settings.
+
+```{r}
+print(R.version)
+set.seed(1)
+```
+
+#Step 1:File Preparetion: Put all the text into one datafram
+
+```{r}
+folder<- "/Users/Keran/Documents/GitHub/Spring2018-Project1-keran0107/data/InauguralSpeeches/"
+# Define a function to read all files from a folder into a data frame
+read_folder <- function(infolder) {
+  data_frame(file = dir(infolder, full.names = TRUE)) %>%
+    mutate(text = map(file, read_lines)) %>%
+    transmute(id = basename(file), text) %>%
+    unnest(text)
+}
+# Read the folder
+raw_text <- read_folder(folder)
+# Set the data info and text into one datafram
+dates<- read.csv("InauguationDates.txt",as.is = T, header = T, sep = "")
+info<- read.csv("InaugurationInfo.csv")
+info2<- info[order(info$President),]
+# Combine the info datafrme and speech datafram
+raw_text<- cbind(raw_text,info2)
+# Put the speech as time order
+raw_text_order<- raw_text[order(as.numeric(rownames(raw_text))),]
+```
+#Step2: Pre-processing Text
+
+Each message has some structure and extra text that we don’t want to include in our analysis, such as "and" and "the". So here use the dplyr package to delet these information.
+```{r}
+tidy_words <- raw_text_order %>%
+  unnest_tokens(word, text) %>%
+  filter(str_detect(word, "[a-z']$"),
+         !word %in% stop_words$word)
+```
+
+#Step3: Analysis over Parties
+##Simple Analysis over Parties
+###Number of Presidents from Different Parties
+
+Notice the party column, which describes which of the different parties each president comes from. So we can calculate how many speeches each party ever made through American History, which means the number of presidents from different parties.
+
+```{r}
+raw_text_order %>%
+  group_by(Party) %>%
+  summarize(messages = n_distinct(id)) %>%
+  ggplot(aes(Party, messages)) +
+  geom_col() +
+  coord_flip()
+```
+From the figure above, we can see that the number of presidents from Republican is largest, and the second one is Democratic.
+
+###Overall Words Frequency 
+```{r}
+tidy_words %>%
+  count(word, sort = TRUE)
+words_by_party <- tidy_words %>%
+  count(Party, word, sort = TRUE) %>%
+  ungroup()
+```
+
+###Top 20 words for Each Party
+
+```{r}
+find_top_20<- function(party){
+  return(party[1:20,])
+}
+ddply(words_by_party, .(Party), find_top_20)
+```
+We can see that the most common words in different parties are slightly different, then we can use ti-dif to show the result clearer.
+
+###Find tf-idf within party
+
+```{r}
+tf_idf <- words_by_party %>%
+  bind_tf_idf(word, Party, n) %>%
+  arrange(desc(tf_idf))
+
+tf_idf
+```
+
+###Examine the top tf-idf for each party
+Since the the number of sppeches made by other parties is small, we only consider Republican, Democratic and Republican-Democratic  here.
+
+```{r}
+tf_idf %>%
+  filter(str_detect(Party,"^[RD]")) %>%
+  group_by(Party) %>%
+  top_n(15, tf_idf) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, tf_idf)) %>%
+  ggplot(aes(word, tf_idf, fill = Party)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ Party, scales = "free") +
+  ylab("tf-idf") +
+  coord_flip()
+```
+We can see the differences between these three parties and find the special words for each party. Democratic mentioned more about "generation, women, children, taxas and values". Whereas Republican metioned more about "ecnomic, business, freedom, tariff and nergo". But the result of Republican-Democratic is not significant, since the number of speech is small to conclude an outcome.
+
+###Calculate the pairwise correlation of word frequencies within each party to the similarity of their speech contents.
+
+```{r}
+party_cors <- words_by_party %>%
+  pairwise_cor(Party, word, n, sort = TRUE)
+
+party_cors
+```
+
+##Topic Model for Democratic, Republican and Democratic-Republican Party
+
+###Pre-processing
+```{r}
+# include only words that occur at least 20 times
+word_party <- tidy_words %>%
+  filter(str_detect(Party, "^[D,R]")) %>%
+  group_by(word) %>%
+  mutate(word_total = n()) %>%
+  ungroup() %>%
+  filter(word_total >= 20)
+
+# convert into a document-term matrix
+word_dtm <- word_party %>%
+  unite(text, Party, id) %>%
+  count(text, word) %>%
+  cast_dtm(text, word, n)
+```
+
+###Run the LDA
+```{r}
+word_lda <- LDA(word_dtm, k = 4, control = list(seed = 2017))
+```
+
+###Visualize each topic based on the most frequent terms within it
+```{r}
+word_lda %>%
+  tidy() %>%
+  group_by(topic) %>%
+  top_n(8, beta) %>%
+  ungroup() %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free_y") +
+  coord_flip()
+```
+###Show speeches from each party have higher “gamma” for each topic
+```{r}
+word_lda %>%
+  tidy(matrix = "gamma") %>%
+  separate(document, c("Party", "id"), sep = "_") %>%
+  mutate(Party = reorder(Party, gamma * topic)) %>%
+  ggplot(aes(factor(topic), gamma)) +
+  geom_boxplot() +
+  facet_wrap(~ Party) +
+  labs(x = "Topic",
+       y = "# of messages where this was the highest % topic")
+```
+We can see the significant differences between Republican and Democratic is Topic model 2 and Topic model 4.
+
+##Sentiment Analysis for Each Party
+###Sentiment Analysis by Word
+###Calculate sentiment score for each Party
+```{r}
+word_sentiments <- words_by_party %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(Party) %>%
+  summarize(score = sum(score * n) / sum(n))
+
+word_sentiments %>%
+  mutate(Party = reorder(Party, score)) %>%
+  ggplot(aes(Party, score, fill = score > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  ylab("Average sentiment score")
+```
+###Examine the total positive and negative contributions of each word
+
+```{r}
+contributions <- tidy_words %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(word) %>%
+  summarize(occurences = n(),
+            contribution = sum(score))
+
+contributions
+```
+###Find words had the most effect on sentiment scores overall.
+```{r}
+contributions %>%
+  top_n(25, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip()
+```
+It is clear that all the speeches prefer positive word except for the word "war".
+###Find words contributed the most within each party
+
+```{r}
+top_sentiment_words <- words_by_party %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  mutate(contribution = score * n / sum(n))
+
+top_sentiment_words
+
+top_sentiment_words %>%
+  group_by(Party) %>%
+  top_n(10, abs(contribution)) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution, fill = Party)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ Party,scales = "free")+
+  coord_flip()
+```
+#Step4: Analysis over Speeches Term1 and Term2
+
+##Simple Analysis over Speeches Term1 and Term2
+```{r}
+words_by_term <- tidy_words %>%
+  count(Term, word, sort = TRUE) %>%
+  ungroup()
+```
+###Top 20 words for Term1 and Term2
+
+```{r}
+ddply(words_by_term, .(Term), find_top_20)
+```
+
+###Find tf-idf within Term1 and Term2
+
+```{r}
+tf_idf_term <- words_by_term %>%
+  bind_tf_idf(word, Term, n) %>%
+  arrange(desc(tf_idf))
+
+tf_idf_term
+```
+
+###Examine the top tf-idf for each Term
+
+```{r}
+tf_idf_term %>%
+  filter(str_detect(Term,"[1,2]")) %>%
+  group_by(Term) %>%
+  top_n(15, tf_idf) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, tf_idf)) %>%
+  ggplot(aes(word, tf_idf, fill = Term)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ Term, scales = "free") +
+  ylab("tf-idf-term") +
+  coord_flip()
+```
+We can see the differences between Term1 and Term2 are small, since there is no word which can show their attitude and emotion.
+###Calculate the pairwise correlation of word frequencies within each term to the similarity of their speech contents.
+
+```{r}
+term_cors <- words_by_term %>%
+  pairwise_cor(Term, word, n, sort = TRUE)
+
+term_cors
+```
+
+We can see the differences between terms are getting higher with time. 
+
+##Topic Model for each Term
+
+###Pre-processing
+```{r}
+# include only words that occur at least 20 times
+word_term <- tidy_words %>%
+  filter(str_detect(Term, "^[1,2,3,4]")) %>%
+  group_by(word) %>%
+  mutate(word_total = n()) %>%
+  ungroup() %>%
+  filter(word_total >= 20)
+
+# convert into a document-term matrix
+word_dtm_term <- word_term %>%
+  unite(text, Term, id) %>%
+  count(text, word) %>%
+  cast_dtm(text, word, n)
+```
+
+###Run the LDA
+```{r}
+word_lda_term <- LDA(word_dtm_term, k = 4, control = list(seed = 2017))
+```
+
+###Visualize each topic based on the most frequent terms within it
+```{r}
+word_lda_term %>%
+  tidy() %>%
+  group_by(topic) %>%
+  top_n(8, beta) %>%
+  ungroup() %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free_y") +
+  coord_flip()
+```
+###Show speeches from each term have higher “gamma” for each topic
+```{r}
+word_lda_term %>%
+  tidy(matrix = "gamma") %>%
+  separate(document, c("Term", "id"), sep = "_") %>%
+  mutate(Term = reorder(Term, gamma * topic)) %>%
+  ggplot(aes(factor(topic), gamma)) +
+  geom_boxplot() +
+  facet_wrap(~ Term) +
+  labs(x = "Topic",
+       y = "# of messages where this was the highest % topic")
+```
+
+##Sentiment Analysis for Each Term
+
+###Sentiment Analysis by Word
+###Calculate sentiment score for each Term
+```{r}
+word_sentiments_term <- words_by_term %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(Term) %>%
+  summarize(score = sum(score * n) / sum(n))
+
+word_sentiments_term %>%
+  mutate(Term = reorder(Term, score)) %>%
+  ggplot(aes(Term, score, fill = score > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  ylab("Average sentiment score")
+```
+We can see their emotion are getting negtive with the term increasing. Since the term4 is only from President Ranklin Delano Roosevelt, we can see his attitude is extremly positive. 
+###Find words contributed the most within each term
+
+```{r}
+top_sentiment_term <- words_by_term %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  mutate(contribution = score * n / sum(n))
+
+top_sentiment_term
+
+top_sentiment_term %>%
+  group_by(Term) %>%
+  top_n(10, abs(contribution)) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution, fill = Term)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ Term,scales = "free")+
+  coord_flip()
+```
